@@ -40,6 +40,8 @@ typedef struct { kit_Image *image; kit_Glyph glyphs[256]; } kit_Font;
 typedef struct {
     bool wants_quit;
     bool hide_cursor;
+    int mouse_wheel_x;
+    int mouse_wheel_y;
     // input
     int char_buf[32];
     uint8_t key_state[256];
@@ -218,6 +220,14 @@ static LRESULT CALLBACK kit__wndproc(HWND hWnd, UINT message, WPARAM wParam, LPA
     kit_Context *ctx = (void*) GetProp(hWnd, "kit_Context");
 
     switch (message) {
+
+ 	case WM_MOUSEWHEEL: {
+		ctx->mouse_wheel_y = GET_WHEEL_DELTA_WPARAM(wParam);
+		ctx->mouse_wheel_y = ctx->mouse_wheel_y < 0 ? -1 : 1;
+	} break;
+	case WM_MOUSEHWHEEL: {
+		ctx->mouse_wheel_x = HIWORD(wParam);
+	} break;
     case WM_PAINT:;
         BITMAPINFO bmi = {
             .bmiHeader.biSize = sizeof(BITMAPINFOHEADER),
@@ -660,9 +670,9 @@ void kit_draw_image3(kit_Context *ctx, kit_Color mul_color, kit_Color add_color,
     int cy1 = ctx->clip.y;
     int cx2 = cx1 + ctx->clip.w;
     int cy2 = cy1 + ctx->clip.h;
-    int stepx = (src.w << 10) / dst.w;
-    int stepy = (src.h << 10) / dst.h;
-    int sy = src.y << 10;
+    int stepx = (src.w << 20) / dst.w;
+    int stepy = (src.h << 20) / dst.h;
+    int sy = src.y << 20;
 
     /* vertical clipping */
     int dy = dst.y;
@@ -675,8 +685,8 @@ void kit_draw_image3(kit_Context *ctx, kit_Color mul_color, kit_Color add_color,
 
     for (; dy < ey; dy++) {
         if (dy >= cy1 && dy < cy2) {
-            int sx = src.x << 10;
-            kit_Color *srow = &img->pixels[(sy >> 10) * img->w];
+            int sx = src.x << 20;
+            kit_Color *srow = &img->pixels[(sy >> 20) * img->w];
             kit_Color *drow = &ctx->screen->pixels[dy * ctx->screen->w];
 
             /* horizontal clipping */
@@ -685,7 +695,7 @@ void kit_draw_image3(kit_Context *ctx, kit_Color mul_color, kit_Color add_color,
             int ex = kit_min(cx2, dst.x + dst.w);
 
             for (; dx < ex; dx++) {
-                kit_Color *s = &srow[sx >> 10];
+                kit_Color *s = &srow[sx >> 20];
                 kit_Color *d = &drow[dx];
                 switch (blend_fn) {
                 case 1: *d = kit__blend_pixel (*d, *s); break;
