@@ -464,10 +464,20 @@ kit_Image* kit_load_image_file(char *filename) {
 }
 
 
-static kit_Image* kit__load_png(void *data, int len);
-
 kit_Image* kit_load_image_mem(void *data, int len) {
-    return kit__load_png(data, len);
+	 int c=0,d=4;
+	 int w,h;
+    void *pixels=stbi_load_from_memory(data,len,&w,&h,&c,d);
+	 kit_Image *image=kit_create_image(w,h);
+    memcpy(image->pixels,pixels,w*h*4);
+    free(pixels);
+    // todo:
+		for(int i=0;i<image->w*image->h;i++){
+			int r=image->pixels[i].r;
+			image->pixels[i].r=image->pixels[i].b;
+			image->pixels[i].b=r;
+		}
+    return image;
 }
 
 
@@ -604,22 +614,16 @@ void kit_set_clip(kit_Context *ctx, kit_Rect rect) {
 }
 
 
-void kit_draw_point(kit_Context *ctx, kit_Color color, int x, int y) {
+void kit_draw_point2(kit_Image *scr, kit_Color color, int x, int y) {
     if (color.a == 0) { return; }
-    kit_Rect r = ctx->clip;
-    if (x < r.x || y < r.y || x >= r.x + r.w || y >= r.y + r.h ) {
-        return;
-    }
-    kit_Color *dst = &ctx->screen->pixels[x + y * ctx->screen->w];
-    *dst = kit__blend_pixel(*dst, color);
+    kit_Color *pixel = &scr->pixels[x + y * scr->w];
+    *pixel = kit__blend_pixel(*pixel, color);
 }
 
-
-void kit_draw_rect(kit_Context *ctx, kit_Color color, kit_Rect rect) {
+void kit_draw_rect2(kit_Image *scr, kit_Color color, kit_Rect rect) {
     if (color.a == 0) { return; }
-    rect = kit__intersect_rects(rect, ctx->clip);
-    kit_Color *d = &ctx->screen->pixels[rect.x + rect.y * ctx->screen->w];
-    int dr = ctx->screen->w - rect.w;
+    kit_Color *d = &scr->pixels[rect.x + rect.y * scr->w];
+    int dr = scr->w - rect.w;
     for (int y = 0; y < rect.h; y++) {
         for (int x = 0; x < rect.w; x++) {
             *d = kit__blend_pixel(*d, color);
@@ -629,20 +633,42 @@ void kit_draw_rect(kit_Context *ctx, kit_Color color, kit_Rect rect) {
     }
 }
 
+void kit_draw_point(kit_Context *ctx, kit_Color color, int x, int y) {
+    if (color.a == 0) { return; }
+    kit_Rect r = ctx->clip;
+    if (x < r.x || y < r.y || x >= r.x + r.w || y >= r.y + r.h ) {
+        return;
+    }
+    kit_draw_point2(ctx->screen,color,x,y);
+}
 
-void kit_draw_line(kit_Context *ctx, kit_Color color, int x1, int y1, int x2, int y2) {
+void kit_draw_rect(kit_Context *ctx, kit_Color color, kit_Rect rect) {
+    rect = kit__intersect_rects(rect, ctx->clip);
+    kit_draw_rect2(ctx->screen,color,rect);
+}
+
+
+void kit_draw_line2(kit_Image *scr, kit_Color color, int x1, int y1, int x2, int y2) {
     int dx = abs(x2-x1);
     int sx = x1 < x2 ? 1 : -1;
     int dy = -abs(y2 - y1);
     int sy = y1 < y2 ? 1 : -1;
     int err = dx + dy;
     for (;;) {
-        kit_draw_point(ctx, color, x1, y1);
+    	  kit_draw_point2(scr,color,x1,y1);
+        // kit_draw_point(ctx, color, x1, y1);
         if (x1 == x2 && y1 == y2) { break; }
         int e2 = err << 1;
         if (e2 >= dy) { err += dy; x1 += sx; }
         if (e2 <= dx) { err += dx; y1 += sy; }
     }
+}
+
+
+
+void kit_draw_line(kit_Context *ctx, kit_Color color, int x1, int y1, int x2, int y2) {
+
+	kit_draw_line2(ctx->screen,color,x1,y1,x2,y2);
 }
 
 
@@ -724,454 +750,11 @@ int kit_draw_text2(kit_Context *ctx, kit_Color color, kit_Font *font, char *text
     return x;
 }
 
-
-//////////////////////////////////////////////////////////////////////////////
-// PNG loader | borrowed from tigr : https://github.com/erkkah/tigr
-//////////////////////////////////////////////////////////////////////////////
-
-typedef struct {
-    const unsigned char *p, *end;
-} kit__Png;
-
-typedef struct {
-    unsigned bits, count;
-    const unsigned char *in, *inend;
-    unsigned char *out, *outend;
-    jmp_buf jmp;
-    unsigned litcodes[288], distcodes[32], lencodes[19];
-    int tlit, tdist, tlen;
-} kit__PngState;
-
-
-#define FAIL() longjmp(s->jmp, 1)
-#define CHECK(X) if (!(X)) { FAIL(); }
-
-// Built-in DEFLATE standard tables.
-static char    kit__png_order[]        = { 16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15 };
-static char  kit__png_len_bits[29 + 2] = { 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0, 0, 0 };
-static int   kit__png_len_base[29 + 2] = { 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258, 0,  0 };
-static char kit__png_dist_bits[30 + 2] = { 0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13, 0, 0 };
-static int  kit__png_dist_base[30 + 2] = { 1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577 };
-
-// Table to bit-reverse a byte.
-static const unsigned char kit__png_reverse_table[256] = {
-#define R2(n) n, n + 128, n + 64, n + 192
-#define R4(n) R2(n), R2(n + 32), R2(n + 16), R2(n + 48)
-#define R6(n) R4(n), R4(n + 8), R4(n + 4), R4(n + 12)
-    R6(0), R6(2), R6(1), R6(3)
-};
-#undef R2
-#undef R4
-#undef R6
-
-static unsigned kit__png_rev16(unsigned n) {
-    return (kit__png_reverse_table[n & 0xff] << 8) | kit__png_reverse_table[(n >> 8) & 0xff];
-}
-
-static int kit__png_bits(kit__PngState* s, int n) {
-    int v = s->bits & ((1 << n) - 1);
-    s->bits >>= n;
-    s->count -= n;
-    while (s->count < 16) {
-        CHECK(s->in != s->inend);
-        s->bits |= (*s->in++) << s->count;
-        s->count += 8;
-    }
-    return v;
-}
-
-static unsigned char* kit__png_emit(kit__PngState* s, int len) {
-    s->out += len;
-    CHECK(s->out <= s->outend);
-    return s->out - len;
-}
-
-static void kit__png_copy(kit__PngState* s, const unsigned char* src, int len) {
-    unsigned char* dest = kit__png_emit(s, len);
-    while (len--) { *dest++ = *src++; }
-}
-
-static int kit__png_build(kit__PngState* s, unsigned* tree, unsigned char* lens, int symcount) {
-    int n, codes[16], first[16], counts[16] = { 0 };
-
-    // Frequency count.
-    for (n = 0; n < symcount; n++)
-        counts[lens[n]]++;
-
-    // Distribute codes.
-    counts[0] = codes[0] = first[0] = 0;
-    for (n = 1; n <= 15; n++) {
-        codes[n] = (codes[n - 1] + counts[n - 1]) << 1;
-        first[n] = first[n - 1] + counts[n - 1];
-    }
-    CHECK(first[15] + counts[15] <= symcount);
-
-    // Insert keys into the tree for each symbol.
-    for (n = 0; n < symcount; n++) {
-        int len = lens[n];
-        if (len != 0) {
-            int code = codes[len]++, slot = first[len]++;
-            tree[slot] = (code << (32 - len)) | (n << 4) | len;
-        }
-    }
-
-    return first[15];
-}
-
-static int kit__png_decode(kit__PngState* s, unsigned tree[], int max) {
-    // Find the next prefix code.
-    unsigned lo = 0, hi = max, key;
-    unsigned search = (kit__png_rev16(s->bits) << 16) | 0xffff;
-    while (lo < hi) {
-        unsigned guess = (lo + hi) / 2;
-        if (search < tree[guess]) {
-            hi = guess;
-        } else {
-            lo = guess + 1;
-        }
-    }
-
-    // Pull out the key and check it.
-    key = tree[lo - 1];
-    CHECK(((search ^ key) >> (32 - (key & 0xf))) == 0);
-
-    kit__png_bits(s, key & 0xf);
-    return (key >> 4) & 0xfff;
-}
-
-static void kit__png_run(kit__PngState* s, int sym) {
-    int length = kit__png_bits(s, kit__png_len_bits[sym]) + kit__png_len_base[sym];
-    int dsym = kit__png_decode(s, s->distcodes, s->tdist);
-    int offs = kit__png_bits(s, kit__png_dist_bits[dsym]) + kit__png_dist_base[dsym];
-    kit__png_copy(s, s->out - offs, length);
-}
-
-static void kit__png_block(kit__PngState* s) {
-    for (;;) {
-        int sym = kit__png_decode(s, s->litcodes, s->tlit);
-        if (sym < 256) { *kit__png_emit(s, 1) = (unsigned char)sym; } else
-        if (sym > 256) { kit__png_run(s, sym - 257); } else { break; }
-    }
-}
-
-static void kit__png_stored(kit__PngState* s) {
-    // Uncompressed data kit__png_block.
-    int len;
-    kit__png_bits(s, s->count & 7);
-    len = kit__png_bits(s, 16);
-    CHECK(((len ^ s->bits) & 0xffff) == 0xffff);
-    CHECK(s->in + len <= s->inend);
-
-    kit__png_copy(s, s->in, len);
-    s->in += len;
-    kit__png_bits(s, 16);
-}
-
-static void kit__png_fixed(kit__PngState* s) {
-    // Fixed set of Huffman codes.
-    int n;
-    unsigned char lens[288 + 32];
-    for (n = 0;   n <= 143; n++) { lens[n] = 8; }
-    for (n = 144; n <= 255; n++) { lens[n] = 9; }
-    for (n = 256; n <= 279; n++) { lens[n] = 7; }
-    for (n = 280; n <= 287; n++) { lens[n] = 8; }
-    for (n = 0;   n < 32;   n++) { lens[288 + n] = 5; }
-
-    // Build lit/dist trees.
-    s->tlit  = kit__png_build(s, s->litcodes,  lens, 288);
-    s->tdist = kit__png_build(s, s->distcodes, lens + 288, 32);
-}
-
-static void kit__png_dynamic(kit__PngState* s) {
-    int n, i, nlit, ndist, nlen;
-    unsigned char lenlens[19] = { 0 }, lens[288 + 32];
-    nlit = 257 + kit__png_bits(s, 5);
-    ndist = 1 + kit__png_bits(s, 5);
-    nlen = 4 + kit__png_bits(s, 4);
-    for (n = 0; n < nlen; n++)
-        lenlens[(uint8_t) kit__png_order[n]] = (unsigned char)kit__png_bits(s, 3);
-
-    // Build the tree for decoding code lengths.
-    s->tlen = kit__png_build(s, s->lencodes, lenlens, 19);
-
-    // Decode code lengths.
-    for (n = 0; n < nlit + ndist;) {
-        int sym = kit__png_decode(s, s->lencodes, s->tlen);
-        switch (sym) {
-        case 16: for (i = 3 + kit__png_bits(s, 2); i; i--, n++) { lens[n] = lens[n - 1]; } break;
-        case 17: for (i = 3 + kit__png_bits(s, 3); i; i--, n++) { lens[n] = 0; }           break;
-        case 18: for (i = 11 + kit__png_bits(s, 7); i; i--, n++) { lens[n] = 0; }          break;
-        default: lens[n++] = (unsigned char)sym;                                  break;
-        }
-    }
-
-    // Build lit/dist trees.
-    s->tlit  = kit__png_build(s, s->litcodes,  lens, nlit);
-    s->tdist = kit__png_build(s, s->distcodes, lens + nlit, ndist);
-}
-
-int kit__png_inflate(void* out, unsigned outlen, const void* in, unsigned inlen) {
-    int last;
-    kit__PngState state = {0};
-    kit__PngState *s = &state;
-
-    // We assume we can buffer 2 extra bytes from off the end of 'in'.
-    s->in     = (unsigned char*)in;
-    s->inend  = s->in + inlen + 2;
-    s->out    = (unsigned char*)out;
-    s->outend = s->out + outlen;
-    s->bits   = 0;
-    s->count  = 0;
-    kit__png_bits(s, 0);
-
-    if (setjmp(s->jmp) == 1) { return 0; }
-
-    do {
-        last = kit__png_bits(s, 1);
-        switch (kit__png_bits(s, 2)) {
-        case 0: kit__png_stored(s);            break;
-        case 1: kit__png_fixed(s);   kit__png_block(s); break;
-        case 2: kit__png_dynamic(s); kit__png_block(s); break;
-        case 3: FAIL();
-        }
-    } while (!last);
-
-    return 1;
-}
-
-#undef CHECK
-#undef FAIL
-
-static unsigned kit__png_get32(const unsigned char* v) {
-    return (v[0] << 24) | (v[1] << 16) | (v[2] << 8) | v[3];
-}
-
-static const unsigned char* kit__png_find(kit__Png* png, const char* chunk, unsigned minlen) {
-    const unsigned char* start;
-    while (png->p < png->end) {
-        unsigned len = kit__png_get32(png->p + 0);
-        start = png->p;
-        png->p += len + 12;
-        if (memcmp(start + 4, chunk, 4) == 0 && len >= minlen && png->p <= png->end)
-            return start + 8;
-    }
-
-    return NULL;
-}
-
-static unsigned char kit__png_paeth(unsigned char a, unsigned char b, unsigned char c) {
-    int p = a + b - c;
-    int pa = abs(p - a), pb = abs(p - b), pc = abs(p - c);
-    return (pa <= pb && pa <= pc) ? a : (pb <= pc) ? b : c;
-}
-
-
-static int kit__png_row_bytes(int w, int bipp) {
-    int rowBits = w * bipp;
-    return rowBits / 8 + ((rowBits % 8) ? 1 : 0);
-}
-
-
-static int kit__png_unfilter(int w, int h, int bipp, unsigned char* raw) {
-    int len = kit__png_row_bytes(w, bipp);
-    int bpp = kit__png_row_bytes(1, bipp);
-    int x, y;
-    unsigned char* first = (unsigned char*)malloc(len + 1);
-    memset(first, 0, len + 1);
-    unsigned char* prev = first;
-    for (y = 0; y < h; y++, prev = raw, raw += len) {
-#define LOOP(A, B)            \
-    for (x = 0; x < bpp; x++) \
-        raw[x] += A;          \
-    for (; x < len; x++)      \
-        raw[x] += B;          \
-    break
-        switch (*raw++) {
-        case 0: break;
-        case 1: LOOP(0, raw[x - bpp]);
-        case 2: LOOP(prev[x], prev[x]);
-        case 3: LOOP(prev[x] / 2, (raw[x - bpp] + prev[x]) / 2);
-        case 4: LOOP(prev[x], kit__png_paeth(raw[x - bpp], prev[x], prev[x - bpp]));
-        default: return 0;
-        }
-#undef LOOP
-    }
-    free(first);
-    return 1;
-}
-
-static void kit__png_convert(int bypp, int w, int h, const unsigned char* src, kit_Color* dest, const unsigned char* trns) {
-    int x, y;
-    for (y = 0; y < h; y++) {
-        src++;  // skip filter byte
-        for (x = 0; x < w; x++, src += bypp) {
-            switch (bypp) {
-            case 1: {
-                unsigned char c = src[0];
-                if (trns && c == *trns) {
-                    *dest++ = kit_rgba(c, c, c, 0);
-                    break;
-                } else {
-                    *dest++ = kit_rgb(c, c, c);
-                    break;
-                }
-            }
-            case 2:
-                *dest++ = kit_rgba(src[0], src[0], src[0], src[1]);
-                break;
-            case 3: {
-                unsigned char r = src[0];
-                unsigned char g = src[1];
-                unsigned char b = src[2];
-                if (trns && trns[1] == r && trns[3] == g && trns[5] == b) {
-                    *dest++ = kit_rgba(r, g, b, 0);
-                    break;
-                } else {
-                    *dest++ = kit_rgb(r, g, b);
-                    break;
-                }
-            }
-            case 4:
-                *dest++ = kit_rgba(src[0], src[1], src[2], src[3]);
-                break;
-            }
-        }
-    }
-}
-
-static void kit__png_depalette(int w, int h, unsigned char* src, kit_Color* dest, int bipp, const unsigned char* plte, const unsigned char* trns, int trnsSize) {
-    int x, y, c;
-    unsigned char alpha;
-    int mask = 0;
-    int len = 0;
-
-    switch (bipp) {
-    case 4: mask = 15; len = 1; break;
-    case 2: mask = 3;  len = 3; break;
-    case 1: mask = 1;  len = 7; break;
-    }
-
-    for (y = 0; y < h; y++) {
-        src++;  // skip filter byte
-        for (x = 0; x < w; x++) {
-            if (bipp == 8) {
-                c = *src++;
-            } else {
-                int pos = x & len;
-                c = (src[0] >> ((len - pos) * bipp)) & mask;
-                if (pos == len) {
-                    src++;
-                }
-            }
-            alpha = 255;
-            if (c < trnsSize) {
-                alpha = trns[c];
-            }
-            *dest++ = kit_rgba(plte[c * 3 + 0], plte[c * 3 + 1], plte[c * 3 + 2], alpha);
-        }
-    }
-}
-
-#define FAIL() goto err;
-#define CHECK(X) if (!(X)) FAIL()
-
-static int kit__png_outsize(kit_Image* bmp, int bipp) {
-    return (kit__png_row_bytes(bmp->w, bipp) + 1) * bmp->h;
-}
-
-static kit_Image* kit__load_png(void *png_data, int png_len) {
-    kit__Png png = { png_data, ((uint8_t*) png_data) + png_len };
-
-    const unsigned char *ihdr, *idat, *plte, *trns, *first;
-    int trnsSize = 0;
-    int depth, ctype, bipp;
-    int datalen = 0;
-    unsigned char *data = NULL, *out;
-    kit_Image* bmp = NULL;
-
-    CHECK(memcmp(png.p, "\211PNG\r\n\032\n", 8) == 0);  // kit__Png signature
-    png.p += 8;
-    first = png.p;
-
-    // Read IHDR
-    ihdr = kit__png_find(&png, "IHDR", 13);
-    CHECK(ihdr);
-    depth = ihdr[8];
-    ctype = ihdr[9];
-    switch (ctype) {
-    case 0: bipp = depth;     break;  // greyscale
-    case 2: bipp = depth * 3; break;  // RGB
-    case 3: bipp = depth;     break;  // paletted
-    case 4: bipp = depth * 2; break;  // grey+alpha
-    case 6: bipp = depth * 4; break;  // RGBA
-    default: FAIL();
-    }
-
-    // Allocate bitmap (+1 width to save room for stupid kit__Png filter bytes)
-    bmp = kit_create_image(kit__png_get32(ihdr + 0) + 1, kit__png_get32(ihdr + 4));
-    CHECK(bmp);
-    bmp->w--;
-
-    // We support 8-bit color components and 1, 2, 4 and 8 bit palette formats.
-    // No interlacing, or wacky filter types.
-    CHECK((depth != 16) && ihdr[10] == 0 && ihdr[11] == 0 && ihdr[12] == 0);
-
-    // Join IDAT chunks.
-    for (idat = kit__png_find(&png, "IDAT", 0); idat; idat = kit__png_find(&png, "IDAT", 0)) {
-        unsigned len = kit__png_get32(idat - 8);
-        data = (unsigned char*)realloc(data, datalen + len);
-        if (!data)
-            break;
-
-        memcpy(data + datalen, idat, len);
-        datalen += len;
-    }
-
-    // Find palette.
-    png.p = first;
-    plte = kit__png_find(&png, "PLTE", 0);
-
-    // Find transparency info.
-    png.p = first;
-    trns = kit__png_find(&png, "tRNS", 0);
-    if (trns) { trnsSize = kit__png_get32(trns - 8); }
-
-    CHECK(data && datalen >= 6);
-    CHECK(
-           (data[0] & 0x0f) == 0x08  // compression method (RFC 1950)
-        && (data[0] & 0xf0) <= 0x70  // window size
-        && (data[1] & 0x20) == 0     // preset dictionary present
-    );
-
-    out = (unsigned char*)bmp->pixels + kit__png_outsize(bmp, 32) - kit__png_outsize(bmp, bipp);
-    CHECK(kit__png_inflate(out, kit__png_outsize(bmp, bipp), data + 2, datalen - 6));
-    CHECK(kit__png_unfilter(bmp->w, bmp->h, bipp, out));
-
-    if (ctype == 3) {
-        CHECK(plte);
-        kit__png_depalette(bmp->w, bmp->h, out, bmp->pixels, bipp, plte, trns, trnsSize);
-    } else {
-        CHECK(bipp % 8 == 0);
-        kit__png_convert(bipp / 8, bmp->w, bmp->h, out, bmp->pixels, trns);
-    }
-
-    free(data);
-    return bmp;
-
-err:
-    if (data) { free(data); }
-    if (bmp)  { free(bmp);  }
-    return NULL;
-}
-
-#undef CHECK
-#undef FAIL
-
-
 //////////////////////////////////////////////////////////////////////////////
 // Embedded font
 //////////////////////////////////////////////////////////////////////////////
 
+#if 1
 static char kit__font_png[] = {
 0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
 0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x00, 0x01, 0x00,
@@ -1298,5 +881,6 @@ static char kit__font_png[] = {
 
 static void *kit__font_png_data = kit__font_png;
 static int   kit__font_png_size = sizeof(kit__font_png);
+#endif
 
 #endif // KIT_IMPL
